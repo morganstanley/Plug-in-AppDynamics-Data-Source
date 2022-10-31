@@ -1,0 +1,36 @@
+{
+  "$schema": "https://raw.githubusercontent.com/grafana/grafana/master/docs/sources/developers/plugins/plugin.schema.json",
+  "type": "datasource",
+  "name": "Appdynamics",
+  "id": "appdynamics-datasource",
+  "metrics": true,
+  "info": {
+    "description": "React-based Appdynamcis Grafana Datasource Plugin",
+    "author": {
+      "name": "Morgan Stanley",
+      "url": "https://github.com/morganstanley/Plug-in-AppDynamics-Data-Source"
+    },
+    "keywords": ["AppDynamics", "Datasource"],
+    "logos": {
+      "small": "img/logo.svg",
+      "large": "img/logo.svg"
+    },
+    "links": [
+      {
+        "name": "Website",
+        "url": "https://github.com/morganstanley/Plug-in-AppDynamics-Data-Source"
+      },
+      {
+        "name": "License",
+        "url": "https://github.com/morganstanley/Plug-in-AppDynamics-Data-Source/blob/main/LICENSE"
+      }
+    ],
+    "screenshots": [],
+    "version": "1.0.0",
+    "updated": "2022-10-30"
+  },
+  "dependencies": {
+    "grafanaDependency": ">=7.0.0",
+    "plugins": []
+  }
+}
