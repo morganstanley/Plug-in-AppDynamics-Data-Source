@@ -4,7 +4,8 @@
 
 This is an AppDynamics Grafana Data Source Plugin.
 
-![AppD plugin screenshot](./img/AppD.png) 
+<img src="./img/AppD.png"  height="500" />
+<img src="./img/Dashboard.png"  height="500" />
 
 ## Getting started
 
