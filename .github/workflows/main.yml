@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Setup Node.js environment
+        uses: actions/setup-node@v3
+        with:
+          node-version: '16.x'
+
+      - name: Cache node_modules
+        id: cache-node-modules
+        uses: actions/cache@v3
+        with:
+          path: node_modules
+          key: $\{{ runner.os }}-$\{{ matrix.node-version }}-nodemodules-$\{{ hashFiles('**/yarn.lock') }}
+          restore-keys: |
+            $\{{ runner.os }}-$\{{ matrix.node-version }}-nodemodules-
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build and test frontend
+        run: npm run build
+
+      - name: Run e2e tests
+        run: npm run test:coverage
