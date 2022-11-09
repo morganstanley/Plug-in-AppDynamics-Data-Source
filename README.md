@@ -1,8 +1,12 @@
 # AppDynamics Grafana Data Source Plugin
 
+[![CI](https://github.com/morganstanley/Plug-in-AppDynamics-Data-Source/actions/workflows/main.yml/badge.svg)](https://github.com/morganstanley/Plug-in-AppDynamics-Data-Source/actions/workflows/main.yml)
+
 This is an AppDynamics Grafana Data Source Plugin.
 
+<!---
 ![AppD plugin screenshot](./img/AppD.PNG) 
+-->
 
 ## Getting started
 
