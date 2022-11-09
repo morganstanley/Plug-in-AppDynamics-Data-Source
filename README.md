@@ -4,7 +4,7 @@
 
 This is an AppDynamics Grafana Data Source Plugin.
 
-![AppD plugin screenshot](./img/AppD.PNG) 
+![AppD plugin screenshot](./img/AppD.png) 
 
 ## Getting started
 
