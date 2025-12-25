@@ -1,5 +1,5 @@
-// Morgan Stanley makes this available to you under the Apache License, Version 2.0 (the "License"). 
-// You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0. 
+// Morgan Stanley makes this available to you under the Apache License, Version 2.0 (the "License").
+// You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0.
 // See the NOTICE file distributed with this work for additional information regarding copyright ownership.
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -9,98 +9,120 @@ import {
   DataQueryRequest,
   DataQueryResponse,
   DataSourceApi,
-  FieldType,
-  dateMath,
-  MutableDataFrame,
   DataSourceInstanceSettings,
+  DateTime,
+  FieldType,
+  MutableDataFrame,
+  dateMath,
 } from '@grafana/data';
 
 import { getBackendSrv } from '@grafana/runtime';
 
-import { MyQuery, AppdynamicsOptions } from './types';
+import { AppdynamicsOptions, MyQuery } from './types';
+
+type BackendSrv = ReturnType<typeof getBackendSrv>;
+
+interface MetricValue {
+  value: number | string;
+  startTimeInMillis: number;
+}
+
+interface MetricDataResponse {
+  data?: Array<{
+    metricValues?: MetricValue[];
+  }>;
+}
+
+interface ApplicationName {
+  name: string;
+}
 
 export class DataSource extends DataSourceApi<MyQuery, AppdynamicsOptions> {
+  private readonly backendSrv: BackendSrv;
+  private readonly url: string;
 
-  username: string;
-  password: string;
-  url: string;
-  hosts?: string[];
-
-  constructor(instanceSettings: DataSourceInstanceSettings<AppdynamicsOptions>) {
+  constructor(
+    instanceSettings: DataSourceInstanceSettings<AppdynamicsOptions>,
+    backendSrv: BackendSrv = getBackendSrv()
+  ) {
     super(instanceSettings);
-    this.username = instanceSettings.username as string;
-    this.password = instanceSettings.password as string;
-    this.url = instanceSettings.url as string;
-    this.hosts = instanceSettings.jsonData.hosts;
+    this.backendSrv = backendSrv;
+    this.url = instanceSettings.url ?? '';
   }
 
-  async doRequest(host: string, application: string, query: string, startTime: number, endTime: number) {
-    const result = await getBackendSrv().datasourceRequest({
-      url: this.url + '/controller/rest/applications/' + application + '/metric-data',
+  async doRequest(
+    _host: string,
+    application: string,
+    query: string,
+    startTime: number,
+    endTime: number
+  ) {
+    return this.backendSrv.datasourceRequest({
+      url: `${this.url}/controller/rest/applications/${application}/metric-data`,
       method: 'GET',
       params: {
         'metric-path': query,
         'time-range-type': 'BETWEEN_TIMES',
         'start-time': startTime,
         'end-time': endTime,
-        'rollup': 'false',
-        'output': 'json'
+        rollup: 'false',
+        output: 'json',
       },
-      headers: { 'Content-Type': 'application/json' }
-    })
-
-    console.log(this.url);
-    return result;
+      headers: { 'Content-Type': 'application/json' },
+    });
   }
 
-  async getApplicationNames(query: DataQueryRequest<MyQuery>) {
-    console.log(query?.targets[0]);
-    console.log(typeof (query));
-    let response = await getBackendSrv().datasourceRequest({
-      url: this.url + '/controller/rest/applications',
+  async getApplicationNames(_query?: DataQueryRequest<MyQuery>): Promise<ApplicationName[]> {
+    const response = await this.backendSrv.datasourceRequest({
+      url: `${this.url}/controller/rest/applications`,
       method: 'GET',
-      params: { output: 'json' }
+      params: { output: 'json' },
     });
-    if (response.status === 200) {
-      console.log(this.getFilteredNames('', response.data));
-      return this.getFilteredNames('', response.data);
-    } else {
-      console.log(response.status);
+
+    if (response.status !== 200) {
       return [];
     }
+
+    return this.getFilteredNames('', response.data as ApplicationName[]);
   }
 
-  getFilteredNames(query: string, arrayResponse: any) {
-    if (query.indexOf('|') > -1) {
-      const queryPieces = query.split('|');
-      query = queryPieces[queryPieces.length - 1];
-    }
+  getFilteredNames(query: string, arrayResponse: ApplicationName[]) {
+    const normalizedQuery = query.includes('|') ? (query.split('|').pop() ?? '') : query;
 
-    if (query.length === 0) {
+    if (normalizedQuery.length === 0) {
       return arrayResponse;
-
-    } else {
-      return arrayResponse.filter((element: any) => {
-        return query.toLowerCase().indexOf(element.name.toLowerCase()) !== -1
-          || element.name.toLowerCase().indexOf(query.toLowerCase()) !== -1;
-      });
     }
+
+    return arrayResponse.filter((element) => {
+      const elementName = element.name.toLowerCase();
+      const queryText = normalizedQuery.toLowerCase();
+      return queryText.includes(elementName) || elementName.includes(queryText);
+    });
   }
 
   async query(options: DataQueryRequest<MyQuery>): Promise<DataQueryResponse> {
-    const startTime = (Math.ceil(dateMath.parse(options.range.from)?.valueOf() as number));
-    const endTime = (Math.ceil(dateMath.parse(options.range.to)?.valueOf() as number));
-    const promises = options.targets.map((query) =>
-      this.doRequest(query.host as string, query.application as string, query.queryText as string, startTime, endTime).then((response) => {
+    const startTime = this.toEpochMillis(options.range.from);
+    const endTime = this.toEpochMillis(options.range.to);
+
+    const frames = await Promise.all(
+      options.targets.map(async (target) => {
+        const response = await this.doRequest(
+          target.host as string,
+          target.application as string,
+          target.queryText as string,
+          startTime,
+          endTime
+        );
+
         const frame = new MutableDataFrame({
-          refId: query.refId,
+          refId: target.refId,
           fields: [
-            { name: "Time", type: FieldType.time },
-            { name: query.queryText as string, type: FieldType.number },
+            { name: 'Time', type: FieldType.time },
+            { name: target.queryText as string, type: FieldType.number },
           ],
         });
-        console.log(response);
-        this.convertMetricData(response).forEach((point: any) => {
+
+        this.convertMetricData(response as MetricDataResponse).forEach((point) => {
           frame.appendRow([point[1], point[0]]);
         });
 
@@ -108,34 +130,38 @@ export class DataSource extends DataSourceApi<MyQuery, AppdynamicsOptions> {
       })
     );
 
-    return Promise.all(promises).then((data) => ({ data }));
+    return { data: frames };
   }
 
   async testDatasource() {
-    let response = await getBackendSrv().datasourceRequest({
-      url: this.url + '/controller/rest/applications',
+    const response = await this.backendSrv.datasourceRequest({
+      url: `${this.url}/controller/rest/applications`,
       method: 'GET',
-      params: { output: 'json' }
+      params: { output: 'json' },
     });
 
     if (response.status === 200) {
       return { status: 'success', message: 'Data source is working', title: 'Success' };
-    } else {
-      return { status: 'failure', message: 'Data source is not working due to: ' + response.status, title: 'Failure' };
-    }
-  }
-
-  convertMetricData(metricElement: any) {
-    const responseArray: any[] = [];
-    console.log(typeof (metricElement));
-    console.log(metricElement);
-    if (!(typeof (metricElement) == 'string')) {
-      metricElement?.data[0].metricValues.forEach((metricValue: any) => {
-        responseArray.push([metricValue.value, metricValue.startTimeInMillis]);
-      });
     }
 
-    return responseArray;
+    return {
+      status: 'failure',
+      message: `Data source is not working due to: ${response.status}`,
+      title: 'Failure',
+    };
   }
 
+  convertMetricData(metricElement?: MetricDataResponse | string) {
+    if (!metricElement || typeof metricElement === 'string') {
+      return [];
+    }
+
+    const metricValues = metricElement.data?.[0]?.metricValues ?? [];
+    return metricValues.map((metricValue) => [metricValue.value, metricValue.startTimeInMillis]);
+  }
+
+  private toEpochMillis(value: DateTime | string) {
+    const parsed = dateMath.parse(value);
+    return Math.ceil(parsed?.valueOf() ?? 0);
+  }
 }
