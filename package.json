@@ -14,6 +14,7 @@
     "start": "npm run dev",
     "test": "jest --watch --onlyChanged",
     "test:ci": "jest --passWithNoTests --maxWorkers 4",
+    "test:coverage": "jest --coverage",
     "typecheck": "tsc --noEmit"
   },
   "author": "Yuxuan Chen",
