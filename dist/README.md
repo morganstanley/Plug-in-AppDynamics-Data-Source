@@ -1,8 +1,13 @@
+![Lifecycle Active](https://img.shields.io/badge/Lifecycle-Active-brightgreen)
+
 # AppDynamics Grafana Data Source Plugin
+
+[![CI](https://github.com/morganstanley/Plug-in-AppDynamics-Data-Source/actions/workflows/main.yml/badge.svg)](https://github.com/morganstanley/Plug-in-AppDynamics-Data-Source/actions/workflows/main.yml)
 
 This is an AppDynamics Grafana Data Source Plugin.
 
-![AppD plugin screenshot](./img/AppD.PNG) 
+<img src="./img/AppD.png"  height="500" />
+<img src="./img/Dashboard.png"  height="500" />
 
 ## Getting started
 
@@ -12,16 +17,10 @@ This is an AppDynamics Grafana Data Source Plugin.
    npm install
    ```
 
-2. Build plugin in development mode or run in watch mode
+2. Build plugin in development mode
 
    ```bash
    npm run dev
-   ```
-
-   or
-
-   ```bash
-   npm run watch
    ```
 
 3. Unit Testing

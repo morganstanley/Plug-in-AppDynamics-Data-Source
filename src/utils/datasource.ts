@@ -40,9 +40,6 @@ interface ApplicationName {
 export class DataSource extends DataSourceApi<MyQuery, AppdynamicsOptions> {
   private readonly backendSrv: BackendSrv;
   private readonly url: string;
-  private readonly hosts?: string[];
-  private readonly username: string;
-  private readonly password: string;
 
   constructor(
     instanceSettings: DataSourceInstanceSettings<AppdynamicsOptions>,
@@ -50,10 +47,7 @@ export class DataSource extends DataSourceApi<MyQuery, AppdynamicsOptions> {
   ) {
     super(instanceSettings);
     this.backendSrv = backendSrv;
-    this.username = instanceSettings.username as string;
-    this.password = instanceSettings.password as string;
     this.url = instanceSettings.url ?? '';
-    this.hosts = instanceSettings.jsonData.hosts;
   }
 
   async doRequest(

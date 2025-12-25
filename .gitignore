@@ -3,5 +3,5 @@ node_modules/
 coverage/
 .env
 .DS_Store
-dist/
 build/
+.config/

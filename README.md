@@ -17,16 +17,10 @@ This is an AppDynamics Grafana Data Source Plugin.
    npm install
    ```
 
-2. Build plugin in development mode or run in watch mode
+2. Build plugin in development mode
 
    ```bash
    npm run dev
-   ```
-
-   or
-
-   ```bash
-   npm run watch
    ```
 
 3. Unit Testing
