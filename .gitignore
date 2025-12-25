@@ -4,4 +4,3 @@ coverage/
 .env
 .DS_Store
 build/
-.config/
