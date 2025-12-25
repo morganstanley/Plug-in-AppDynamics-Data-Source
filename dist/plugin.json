@@ -36,5 +36,5 @@
         "grafanaDependency": ">=12.3.0",
         "plugins": []
     },
-    "buildMode": "development"
+    "buildMode": "production"
 }
