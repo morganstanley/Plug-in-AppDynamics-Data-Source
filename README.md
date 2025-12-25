@@ -1,3 +1,5 @@
+![Lifecycle Active](https://img.shields.io/badge/Lifecycle-Active-brightgreen)
+
 # AppDynamics Grafana Data Source Plugin
 
 [![CI](https://github.com/morganstanley/Plug-in-AppDynamics-Data-Source/actions/workflows/main.yml/badge.svg)](https://github.com/morganstanley/Plug-in-AppDynamics-Data-Source/actions/workflows/main.yml)
