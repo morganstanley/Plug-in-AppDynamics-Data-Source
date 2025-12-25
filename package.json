@@ -1,6 +1,6 @@
 {
   "name": "@morgan-stanley/esm-appdynamics-grafana-react-datasource",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "",
   "scripts": {
     "build:quick": "grafana-toolkit plugin:build --preserveConsole",
@@ -10,45 +10,37 @@
     "dev": "grafana-toolkit plugin:dev",
     "watch": "grafana-toolkit plugin:dev --watch",
     "sign": "grafana-toolkit plugin:sign",
-    "start": "npm run watch"
+    "start": "npm run watch",
+    "format": "prettier --write \"src/**/*.{ts,tsx}\""
   },
   "author": "Yuxuan Chen",
   "license": "Apache-2.0",
   "dependencies": {
-    "@grafana/data": "^9.5.6",
-    "@grafana/runtime": "^9.5.6",
-    "@grafana/toolkit": "^9.5.6",
-    "@grafana/ui": "^9.5.6",
-    "@testing-library/jest-dom": "5.4.0",
-    "@testing-library/react": "^10.0.2",
-    "@types/lodash": "latest",
-    "@typescript-eslint/eslint-plugin": "^4.22.1",
-    "@typescript-eslint/parser": "^4.22.1",
-    "eslint": "^7.26.0",
-    "eslint-config-airbnb": "^18.2.1",
-    "eslint-plugin-import": "^2.22.1",
-    "eslint-plugin-jsx-a11y": "^6.4.1",
-    "eslint-plugin-react": "^7.23.2",
-    "eslint-plugin-react-hooks": "^4.2.0",
+    "@grafana/data": "^9.5.21",
+    "@grafana/runtime": "^9.5.21",
+    "@grafana/ui": "^9.5.21",
     "uplot": "^1.6.9"
   },
   "devDependencies": {
-    "@grafana/data": "^9.5.6",
-    "@grafana/toolkit": "^9.5.6",
-    "@grafana/ui": "^9.5.6",
-    "@testing-library/jest-dom": "5.4.0",
-    "@testing-library/react": "^10.0.2",
-    "@types/lodash": "latest",
-    "@typescript-eslint/eslint-plugin": "^4.22.1",
-    "@typescript-eslint/parser": "^4.22.1",
-    "eslint": "^7.26.0",
+    "@grafana/toolkit": "^9.5.21",
+    "@testing-library/jest-dom": "^5.17.0",
+    "@testing-library/react": "^10.4.9",
+    "@types/lodash": "^4.17.21",
+    "@typescript-eslint/eslint-plugin": "^4.33.0",
+    "@typescript-eslint/parser": "^4.33.0",
+    "eslint": "^7.32.0",
     "eslint-config-airbnb": "^18.2.1",
-    "eslint-plugin-import": "^2.22.1",
-    "eslint-plugin-jsx-a11y": "^6.4.1",
-    "eslint-plugin-react": "^7.23.2",
-    "eslint-plugin-react-hooks": "^4.2.0"
+    "eslint-plugin-import": "^2.32.0",
+    "eslint-plugin-jsx-a11y": "^6.10.2",
+    "eslint-plugin-react": "^7.37.5",
+    "eslint-plugin-react-hooks": "^4.6.2",
+    "prettier": "^3.7.4"
   },
   "engines": {
     "node": ">=14"
+  },
+  "overrides": {
+    "eslint-plugin-jsdoc": "^61.5.0",
+    "@es-joy/jsdoccomment": "^0.78.0"
   }
 }

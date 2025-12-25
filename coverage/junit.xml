@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="jest tests" tests="11" failures="0" errors="0" time="10.446">
+  <testsuite name="undefined" errors="0" failures="0" skipped="0" timestamp="2025-12-25T03:48:54" time="10.16" tests="11">
+    <testcase classname=" doRequest uses backend service and returns response" name=" doRequest uses backend service and returns response" time="0.002">
+    </testcase>
+    <testcase classname=" getFilteredNames returns matches for substring" name=" getFilteredNames returns matches for substring" time="0">
+    </testcase>
+    <testcase classname=" getFilteredNames handles pipeline query" name=" getFilteredNames handles pipeline query" time="0.001">
+    </testcase>
+    <testcase classname=" testDatasource returns success on 200" name=" testDatasource returns success on 200" time="0">
+    </testcase>
+    <testcase classname=" testDatasource returns failure on non-200" name=" testDatasource returns failure on non-200" time="0">
+    </testcase>
+    <testcase classname=" convertMetricData returns metric values" name=" convertMetricData returns metric values" time="0">
+    </testcase>
+    <testcase classname=" convertMetricData supports string values" name=" convertMetricData supports string values" time="0">
+    </testcase>
+    <testcase classname=" convertMetricData returns empty array for invalid payloads" name=" convertMetricData returns empty array for invalid payloads" time="0.001">
+    </testcase>
+    <testcase classname=" getApplicationNames returns filtered names on success" name=" getApplicationNames returns filtered names on success" time="0">
+    </testcase>
+    <testcase classname=" getApplicationNames returns empty list on failure" name=" getApplicationNames returns empty list on failure" time="0">
+    </testcase>
+    <testcase classname=" query builds data frames from metric response" name=" query builds data frames from metric response" time="0.001">
+    </testcase>
+  </testsuite>
+</testsuites>
