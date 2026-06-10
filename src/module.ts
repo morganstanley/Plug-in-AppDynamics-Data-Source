@@ -6,11 +6,13 @@
 // See the License for the specific language governing permissions and limitations under the License.
 
 import { DataSourcePlugin } from '@grafana/data';
-import { DataSource } from './utils/datasource';
-import { ConfigEditor } from './views/ConfigEditor';
-import { QueryEditor } from './views/QueryEditor';
-import { MyQuery, AppdynamicsOptions } from './utils/types';
+import { DataSource } from './datasource';
+import { ConfigEditor } from './components/ConfigEditor';
+import { QueryEditor } from './components/QueryEditor';
+import { VariableQueryEditor } from './components/VariableQueryEditor';
+import { AppDynamicsQuery, AppDynamicsOptions } from './types';
 
-export const plugin = new DataSourcePlugin<DataSource, MyQuery, AppdynamicsOptions>(DataSource)
+export const plugin = new DataSourcePlugin<DataSource, AppDynamicsQuery, AppDynamicsOptions>(DataSource)
   .setConfigEditor(ConfigEditor)
-  .setQueryEditor(QueryEditor);
+  .setQueryEditor(QueryEditor)
+  .setVariableQueryEditor(VariableQueryEditor);

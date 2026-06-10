@@ -4,6 +4,7 @@
   "name": "Appdynamics",
   "id": "appdynamics-datasource",
   "metrics": true,
+  "annotations": true,
   "info": {
     "description": "React-based Appdynamcis Grafana Datasource Plugin",
     "author": {
