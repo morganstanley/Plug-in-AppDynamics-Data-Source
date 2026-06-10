@@ -1,3 +1,12 @@
 {
-  "extends": "./.config/tsconfig.json"
+  "extends": "./.config/tsconfig.json",
+  "ts-node": {
+    "compilerOptions": {
+      "module": "commonjs",
+      "moduleResolution": "node10",
+      "target": "es2022",
+      "esModuleInterop": true
+    },
+    "transpileOnly": true
+  }
 }

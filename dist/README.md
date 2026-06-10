@@ -85,9 +85,6 @@ Requires Node.js 22+.
    npm run server
    ```
 
-The architecture and API research behind the current implementation are documented in
-[`docs/superpowers/specs/2026-06-10-appdynamics-datasource-refactor-design.md`](./docs/superpowers/specs/2026-06-10-appdynamics-datasource-refactor-design.md).
-
 ## Contribution Guide
 
 ### Become a contributor
