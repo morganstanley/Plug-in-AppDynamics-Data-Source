@@ -115,17 +115,45 @@ describe('VariableQueryEditor', () => {
     await waitFor(() => expect(datasource.getApplications).toHaveBeenCalled());
   });
 
-  it('displays legacy string queries read-only and replaces them on edit', async () => {
+  it('initializes the structured controls from a parseable legacy string and preserves its content on edit', async () => {
     const { onChange, datasource } = renderEditor('tiers(Legacy App)');
 
     const legacyInput = screen.getByLabelText('Legacy query');
     expect(legacyInput).toHaveValue('tiers(Legacy App)');
     expect(legacyInput).toBeDisabled();
 
-    openSelect(screen.getByLabelText('Query type'));
-    fireEvent.click(await screen.findByText('Tiers'));
+    // The parsed legacy content shows up in the structured controls.
+    expect(screen.getByText('Tiers')).toBeInTheDocument();
+    expect(screen.getByText('Legacy App')).toBeInTheDocument();
 
-    expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ queryType: 'tiers' }), 'tiers()');
+    // The first edit emits a structured query that keeps the parsed application.
+    openSelect(screen.getByLabelText('Query type'));
+    fireEvent.click(await screen.findByText('Nodes'));
+
+    expect(onChange).toHaveBeenCalledWith(
+      expect.objectContaining({ queryType: 'nodes', application: 'Legacy App' }),
+      'nodes(Legacy App)'
+    );
+
+    await waitFor(() => expect(datasource.getApplications).toHaveBeenCalled());
+  });
+
+  it('initializes application and metric path from a legacy metrics string', async () => {
+    const { datasource } = renderEditor('metrics(My App, Overall Application Performance)');
+
+    expect(screen.getByText('Metric path children')).toBeInTheDocument();
+    expect(screen.getByText('My App')).toBeInTheDocument();
+    expect(screen.getByLabelText('Metric path')).toHaveValue('Overall Application Performance');
+
+    await waitFor(() => expect(datasource.getApplications).toHaveBeenCalled());
+  });
+
+  it('falls back to the applications type for unparseable legacy strings', async () => {
+    const { datasource } = renderEditor('not a known query');
+
+    expect(screen.getByLabelText('Legacy query')).toHaveValue('not a known query');
+    expect(screen.getByText('Applications')).toBeInTheDocument();
+    expect(screen.queryByText('Metric path')).not.toBeInTheDocument();
 
     await waitFor(() => expect(datasource.getApplications).toHaveBeenCalled());
   });

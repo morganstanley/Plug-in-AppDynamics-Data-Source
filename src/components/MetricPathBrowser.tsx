@@ -32,67 +32,48 @@ const WILDCARD = '*';
 export function MetricPathBrowser({ application, value, onChange, datasource }: MetricPathBrowserProps) {
   const [rawMode, setRawMode] = useState(false);
   const [rawDraft, setRawDraft] = useState(value);
+  /**
+   * Browse results keyed by application + path prefix. Doubles as the cache: entries are only
+   * ever added for the current application and the whole map is reset when it changes.
+   * `undefined` for a key means "not loaded yet" and renders as a loading state.
+   */
   const [optionsByKey, setOptionsByKey] = useState<Record<string, MetricTreeItem[]>>({});
-  const [loadingByKey, setLoadingByKey] = useState<Record<string, boolean>>({});
-  /** Cache of browse results, keyed by application + path prefix. */
-  const cacheRef = useRef(new Map<string, MetricTreeItem[]>());
+
+  // React's "adjust state during render" pattern (https://react.dev/learn/you-might-not-need-an-effect):
+  // keep the raw editor in sync when the path changes from the outside...
+  const [prevValue, setPrevValue] = useState(value);
+  if (prevValue !== value) {
+    setPrevValue(value);
+    setRawDraft(value);
+  }
+  // ...and reset the options cache when the application changes (the path value is kept as-is).
+  const [prevApplication, setPrevApplication] = useState(application);
+  if (prevApplication !== application) {
+    setPrevApplication(application);
+    setOptionsByKey({});
+  }
+
+  /**
+   * Generation counter for async browse completions: bumped when the application changes and
+   * on unmount, so orphaned promises (slow responses for a previous application, or responses
+   * arriving after unmount) never call setState. Responses for the *current* application are
+   * additionally scoped by their key, so out-of-order arrivals cannot clobber other levels.
+   */
+  const epochRef = useRef(0);
   const inFlightRef = useRef(new Set<string>());
-  const prevApplicationRef = useRef(application);
+  const lastLoadedApplicationRef = useRef(application);
+
+  // On unmount, invalidate every outstanding completion.
+  useEffect(() => {
+    const epoch = epochRef;
+    return () => {
+      epoch.current += 1;
+    };
+  }, []);
 
   const segments = useMemo(() => (value ? value.split('|') : []), [value]);
 
   const keyFor = useCallback((prefix: string) => `${application}\u0000${prefix}`, [application]);
-
-  // Keep the raw editor in sync when the path changes from the outside.
-  useEffect(() => {
-    setRawDraft(value);
-  }, [value]);
-
-  // When the application changes, reset the options cache; the path value is kept as-is.
-  useEffect(() => {
-    if (prevApplicationRef.current !== application) {
-      prevApplicationRef.current = application;
-      cacheRef.current.clear();
-      inFlightRef.current.clear();
-      setOptionsByKey({});
-      setLoadingByKey({});
-    }
-  }, [application]);
-
-  const loadPrefix = useCallback(
-    (prefix: string) => {
-      const key = keyFor(prefix);
-      const cached = cacheRef.current.get(key);
-      if (cached) {
-        setOptionsByKey((prev) => (prev[key] ? prev : { ...prev, [key]: cached }));
-        return;
-      }
-      if (inFlightRef.current.has(key)) {
-        return;
-      }
-      inFlightRef.current.add(key);
-      setLoadingByKey((prev) => ({ ...prev, [key]: true }));
-      datasource
-        .browseMetricPath(application, prefix === '' ? undefined : prefix)
-        .then((items) => {
-          cacheRef.current.set(key, items);
-          setOptionsByKey((prev) => ({ ...prev, [key]: items }));
-        })
-        .catch(() => {
-          // Browsing is best-effort; the `*` option and raw mode remain usable.
-          setOptionsByKey((prev) => ({ ...prev, [key]: [] }));
-        })
-        .finally(() => {
-          inFlightRef.current.delete(key);
-          setLoadingByKey((prev) => {
-            const next = { ...prev };
-            delete next[key];
-            return next;
-          });
-        });
-    },
-    [application, datasource, keyFor]
-  );
 
   // Whether a pending Select for the next (not yet chosen) level should show: always at the
   // root, after a `*` (wildcards may appear mid-path), or after a known folder segment.
@@ -108,18 +89,49 @@ export function MetricPathBrowser({ application, value, onChange, datasource }: 
     return parentItems?.some((item) => item.name === last && item.type === 'folder') ?? false;
   }, [segments, optionsByKey, keyFor]);
 
-  // Load the options for every visible level (cached per application + prefix).
+  // Load the options for every visible level that is not cached yet. setState happens only in
+  // the async continuations, each guarded by the epoch and scoped to its own key.
   useEffect(() => {
     if (!application || rawMode) {
       return;
     }
+    if (lastLoadedApplicationRef.current !== application) {
+      lastLoadedApplicationRef.current = application;
+      epochRef.current += 1;
+      inFlightRef.current.clear();
+    }
+    const prefixes: string[] = [];
     for (let level = 0; level < segments.length; level++) {
-      loadPrefix(segments.slice(0, level).join('|'));
+      prefixes.push(segments.slice(0, level).join('|'));
     }
     if (nextLevelVisible) {
-      loadPrefix(segments.join('|'));
+      prefixes.push(segments.join('|'));
     }
-  }, [application, rawMode, segments, nextLevelVisible, loadPrefix]);
+    for (const prefix of prefixes) {
+      const key = keyFor(prefix);
+      if (optionsByKey[key] !== undefined || inFlightRef.current.has(key)) {
+        continue;
+      }
+      inFlightRef.current.add(key);
+      const epoch = epochRef.current;
+      datasource
+        .browseMetricPath(application, prefix === '' ? undefined : prefix)
+        .then((items) => {
+          if (epochRef.current === epoch) {
+            setOptionsByKey((prev) => ({ ...prev, [key]: items }));
+          }
+        })
+        .catch(() => {
+          // Browsing is best-effort; the `*` option and raw mode remain usable.
+          if (epochRef.current === epoch) {
+            setOptionsByKey((prev) => ({ ...prev, [key]: [] }));
+          }
+        })
+        .finally(() => {
+          inFlightRef.current.delete(key);
+        });
+    }
+  }, [application, rawMode, segments, nextLevelVisible, optionsByKey, keyFor, datasource]);
 
   const handleLevelChange = (level: number, selected: string) => {
     // Choosing a value at level N truncates everything deeper than N.
@@ -169,7 +181,7 @@ export function MetricPathBrowser({ application, value, onChange, datasource }: 
         width="auto"
         options={options}
         value={current ? { label: current, value: current } : null}
-        isLoading={Boolean(loadingByKey[key])}
+        isLoading={optionsByKey[key] === undefined}
         placeholder="Select…"
         onChange={(option) => {
           if (option.value != null) {

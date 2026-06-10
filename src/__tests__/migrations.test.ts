@@ -5,6 +5,8 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and limitations under the License.
 
+/* eslint-disable @typescript-eslint/no-deprecated -- this suite deliberately exercises the deprecated legacy fields that migrateQuery consumes */
+
 import { migrateQuery } from '../migrations';
 import { AppDynamicsQuery } from '../types';
 
@@ -31,6 +33,32 @@ test('does not overwrite an existing metricPath with queryText', () => {
   const migrated = migrateQuery({ refId: 'A', metricPath: 'New|Path', queryText: 'Old|Path' });
 
   expect(migrated.metricPath).toBe('New|Path');
+});
+
+test('joins legacy metricSegments into metricPath when queryText and metricPath are absent', () => {
+  const migrated = migrateQuery({
+    refId: 'A',
+    application: 'MyApp',
+    metricSegments: ['Overall Application Performance', 'Average Response Time (ms)'],
+  });
+
+  expect(migrated.metricPath).toBe('Overall Application Performance|Average Response Time (ms)');
+  expect('metricSegments' in migrated).toBe(false);
+});
+
+test('queryText takes precedence over metricSegments', () => {
+  const migrated = migrateQuery({
+    refId: 'A',
+    queryText: 'From|QueryText',
+    metricSegments: ['From', 'Segments'],
+  });
+
+  expect(migrated.metricPath).toBe('From|QueryText');
+});
+
+test('existing metricPath wins over metricSegments and empty segments are ignored', () => {
+  expect(migrateQuery({ refId: 'A', metricPath: 'Kept|Path', metricSegments: ['Lost'] }).metricPath).toBe('Kept|Path');
+  expect(migrateQuery({ refId: 'A', metricSegments: [] }).metricPath).toBeUndefined();
 });
 
 test('removes legacy fields', () => {

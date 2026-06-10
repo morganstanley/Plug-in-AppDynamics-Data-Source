@@ -9,7 +9,13 @@ import { of, throwError } from 'rxjs';
 import { dateTime, type DataQueryRequest, type DataSourceInstanceSettings, type ScopedVars } from '@grafana/data';
 import type { BackendSrv, TemplateSrv } from '@grafana/runtime';
 
-import { DataSource, expandMetricPathVariants, parseVariableQuery, renderAlias } from '../datasource';
+import {
+  DataSource,
+  expandMetricPathVariants,
+  formatMultiValueVariable,
+  parseVariableQuery,
+  renderAlias,
+} from '../datasource';
 import { AppDynamicsOptions, AppDynamicsQuery, AppDynamicsVariableQuery } from '../types';
 
 jest.mock('@grafana/runtime', () => ({
@@ -23,8 +29,11 @@ const TO_MS = 1700003600000;
 /** Variables known to the mocked template service. */
 const VARIABLES: Record<string, string[]> = {
   app: ['MyApp'],
+  apps: ['App1', 'App2'],
   tiers: ['tierA', 'tierB'],
   types: ['CUSTOM', 'STALL'],
+  // AppDynamics names legitimately contain commas, braces and parentheses.
+  nasty: ['BT (checkout, v2)', 'Err{or}s'],
 };
 
 type FormatFn = (value: string | string[]) => string;
@@ -79,21 +88,37 @@ const buildRequest = (
 
 const fetchParams = (fetch: jest.Mock, call = 0): FetchCall => fetch.mock.calls[call][0];
 
-describe('expandMetricPathVariants', () => {
-  test('returns paths without braces unchanged', () => {
+describe('formatMultiValueVariable + expandMetricPathVariants', () => {
+  test('single values pass through unchanged', () => {
+    expect(formatMultiValueVariable('plain')).toBe('plain');
+    expect(formatMultiValueVariable(['only'])).toBe('only');
+    expect(formatMultiValueVariable([])).toBe('');
+  });
+
+  test('strings without markers are returned as-is — braces are literal text now', () => {
     expect(expandMetricPathVariants('A|B|C')).toEqual(['A|B|C']);
+    expect(expandMetricPathVariants('Tiers|{a,b}|Calls')).toEqual(['Tiers|{a,b}|Calls']);
   });
 
-  test('expands a single alternation', () => {
-    expect(expandMetricPathVariants('Tiers|{a,b}|Calls')).toEqual(['Tiers|a|Calls', 'Tiers|b|Calls']);
+  test('expands an encoded alternation', () => {
+    const path = `Tiers|${formatMultiValueVariable(['a', 'b'])}|Calls`;
+    expect(expandMetricPathVariants(path)).toEqual(['Tiers|a|Calls', 'Tiers|b|Calls']);
   });
 
-  test('expands multiple alternations combinatorially', () => {
-    expect(expandMetricPathVariants('{a,b}|x|{c,d}')).toEqual(['a|x|c', 'a|x|d', 'b|x|c', 'b|x|d']);
+  test('multiple multi-value variables expand to the full product', () => {
+    const path = `${formatMultiValueVariable(['a', 'b'])}|x|${formatMultiValueVariable(['c', 'd'])}`;
+    expect(expandMetricPathVariants(path)).toEqual(['a|x|c', 'a|x|d', 'b|x|c', 'b|x|d']);
   });
 
-  test('handles a single-value brace group', () => {
-    expect(expandMetricPathVariants('{a}|x')).toEqual(['a|x']);
+  test('values containing commas, braces and parentheses survive expansion intact', () => {
+    const values = ['Calls, total', 'Err{or}s', 'Average Response Time (ms)', '{a,b}'];
+    const path = `Parent|${formatMultiValueVariable(values)}|Leaf`;
+    expect(expandMetricPathVariants(path)).toEqual([
+      'Parent|Calls, total|Leaf',
+      'Parent|Err{or}s|Leaf',
+      'Parent|Average Response Time (ms)|Leaf',
+      'Parent|{a,b}|Leaf',
+    ]);
   });
 });
 
@@ -161,7 +186,7 @@ describe('parseVariableQuery', () => {
 });
 
 describe('query: metrics', () => {
-  const series = (metricPath: string, values: Array<Record<string, number>>) => ({
+  const series = (metricPath: string, values: Array<Record<string, unknown>>) => ({
     metricId: 1,
     metricName: `BTM|${metricPath}`,
     metricPath,
@@ -207,7 +232,31 @@ describe('query: metrics', () => {
     expect(response.data[1].fields[1].name).toBe('Overall|Errors');
     expect(response.data[0].fields[0].values).toEqual([1]);
     expect(response.data[0].fields[1].values).toEqual([10]);
-    expect(response.data[0].meta?.preferredVisualisationType).toBeUndefined();
+    expect(response.data[0].meta?.preferredVisualisationType).toBe('graph');
+  });
+
+  test('coerces numeric-string stats and drops non-finite values', async () => {
+    const fetch = jest.fn(() =>
+      of({
+        data: [
+          series('Overall|Calls', [
+            { startTimeInMillis: 1, value: '12.5' },
+            { startTimeInMillis: 2, value: 'NaN' },
+            { startTimeInMillis: 3, value: null },
+            { startTimeInMillis: 4, value: 'garbage' },
+            { startTimeInMillis: 5, value: Infinity },
+            { startTimeInMillis: 6, value: '' },
+            { startTimeInMillis: 7, value: 7 },
+          ]),
+        ],
+      })
+    );
+    const { dataSource } = createDataSource(fetch);
+
+    const response = await dataSource.query(buildRequest([{ application: 'App', metricPath: 'Overall|Calls' }]));
+
+    expect(response.data[0].fields[0].values).toEqual([1, 7]);
+    expect(response.data[0].fields[1].values).toEqual([12.5, 7]);
   });
 
   test('dataField selects the stat and skips entries missing it', async () => {
@@ -264,19 +313,89 @@ describe('query: metrics', () => {
 
     await dataSource.query(buildRequest([{ application: '$app', metricPath: 'Tiers|$tiers|Calls' }]));
 
-    // The format callback handed to templateSrv.replace must brace-join multi-values...
+    // The format callback handed to templateSrv.replace encodes multi-values
+    // structurally so that expansion recovers them exactly...
     const formatArg = templateSrv.replace.mock.calls.find((call) => typeof call[2] === 'function')?.[2] as (
       value: string | string[]
     ) => string;
-    expect(formatArg(['a', 'b'])).toBe('{a,b}');
+    expect(expandMetricPathVariants(formatArg(['a', 'b']))).toEqual(['a', 'b']);
     expect(formatArg(['a'])).toBe('a');
     expect(formatArg('single')).toBe('single');
 
-    // ...and the braced path expands into one request per tier.
+    // ...and the encoded path expands into one request per tier.
     expect(fetch).toHaveBeenCalledTimes(2);
     expect(fetchParams(fetch, 0).params['metric-path']).toBe('Tiers|tierA|Calls');
     expect(fetchParams(fetch, 1).params['metric-path']).toBe('Tiers|tierB|Calls');
     expect(fetchParams(fetch, 0).url).toBe('http://proxy/controller/rest/applications/MyApp/metric-data');
+  });
+
+  test('multi-value variable values with commas/braces/parens reach the API intact', async () => {
+    const fetch = jest.fn(() => of({ data: [] }));
+    const { dataSource } = createDataSource(fetch);
+
+    await dataSource.query(buildRequest([{ application: 'App', metricPath: 'BTs|$nasty|Calls' }]));
+
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetchParams(fetch, 0).params['metric-path']).toBe('BTs|BT (checkout, v2)|Calls');
+    expect(fetchParams(fetch, 1).params['metric-path']).toBe('BTs|Err{or}s|Calls');
+  });
+
+  test('expands multi-value application variables into one query per application', async () => {
+    const fetch = jest.fn(() => of({ data: [series('X|Calls', [{ startTimeInMillis: 1, value: 1 }])] }));
+    const { dataSource } = createDataSource(fetch);
+
+    const response = await dataSource.query(buildRequest([{ application: '$apps', metricPath: 'X|Calls' }]));
+
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetchParams(fetch, 0).url).toBe('http://proxy/controller/rest/applications/App1/metric-data');
+    expect(fetchParams(fetch, 1).url).toBe('http://proxy/controller/rest/applications/App2/metric-data');
+    // The default series name disambiguates by prefixing the application.
+    expect(response.data[0].fields[1].name).toBe('App1: X|Calls');
+    expect(response.data[1].fields[1].name).toBe('App2: X|Calls');
+    expect(response.data.map((frame: { refId?: string }) => frame.refId)).toEqual(['A', 'A']);
+  });
+
+  test('runs the full application × metric path product and {{application}} disambiguates aliases', async () => {
+    const fetch = jest.fn((_options: FetchCall) => of({ data: [series('a|b', [{ startTimeInMillis: 1, value: 1 }])] }));
+    const { dataSource } = createDataSource(fetch);
+
+    const response = await dataSource.query(
+      buildRequest([{ application: '$apps', metricPath: 'Tiers|$tiers|Calls', alias: '{{application}}/{{2}}' }])
+    );
+
+    expect(fetch).toHaveBeenCalledTimes(4);
+    const calls = fetch.mock.calls.map(([options]) => {
+      return `${options.url.split('/applications/')[1].split('/')[0]} ${options.params['metric-path']}`;
+    });
+    expect(calls).toEqual([
+      'App1 Tiers|tierA|Calls',
+      'App1 Tiers|tierB|Calls',
+      'App2 Tiers|tierA|Calls',
+      'App2 Tiers|tierB|Calls',
+    ]);
+    expect(response.data[0].fields[1].name).toBe('App1/b');
+    expect(response.data[3].fields[1].name).toBe('App2/b');
+  });
+
+  test('keeps surviving frames when one expanded path fails (per-path errors)', async () => {
+    const fetch = jest.fn((options: FetchCall) =>
+      options.params['metric-path'] === 'Tiers|tierB|Calls'
+        ? throwError(() => ({ status: 404, data: 'no such metric' }))
+        : of({ data: [series('Tiers|tierA|Calls', [{ startTimeInMillis: 1, value: 1 }])] })
+    );
+    const { dataSource } = createDataSource(fetch);
+
+    const response = await dataSource.query(buildRequest([{ application: 'App', metricPath: 'Tiers|$tiers|Calls' }]));
+
+    // The surviving sibling path still contributes its frame...
+    expect(response.data).toHaveLength(1);
+    expect(response.data[0].fields[1].name).toBe('Tiers|tierA|Calls');
+    // ...while the failed path is reported with refId and the failing path.
+    expect(response.errors).toHaveLength(1);
+    expect(response.errors?.[0].refId).toBe('A');
+    expect(response.errors?.[0].status).toBe(404);
+    expect(response.errors?.[0].message).toContain('HTTP 404');
+    expect(response.errors?.[0].message).toContain('Tiers|tierB|Calls');
   });
 
   test('isolates per-target failures into DataQueryResponse.errors', async () => {
@@ -300,6 +419,7 @@ describe('query: metrics', () => {
     expect(response.errors?.[0].refId).toBe('B');
     expect(response.errors?.[0].status).toBe(500);
     expect(response.errors?.[0].message).toContain('HTTP 500');
+    expect(response.errors?.[0].message).toContain('metric path "bad"');
   });
 
   test('skips hidden targets and targets that fail filterQuery', async () => {
@@ -370,10 +490,39 @@ describe('query: events', () => {
     expect(frame.fields[0].values).toEqual([123, 456]);
     expect(frame.fields[1].values).toEqual(['APPLICATION_ERROR', 'sub']);
     expect(frame.fields[2].values).toEqual(['Something broke', '']);
-    expect(frame.fields[3].values).toEqual(['ERROR, MyApp', '']);
+    expect(frame.fields[3].values).toEqual(['ERROR,MyApp', '']);
     expect(frame.fields[4].values).toEqual(['11', '12']);
     expect(frame.fields[5].values).toEqual(['https://controller/#/event/11', '']);
     expect(frame.meta?.preferredVisualisationType).toBe('table');
+  });
+
+  test('tags survive Grafana default annotation processing (field named "tags", split on bare comma)', async () => {
+    // Grafana's default annotation processor (standardAnnotationSupport.ts in
+    // grafana/grafana core — not published to npm, hence simulated here) maps
+    // the field NAMED 'tags' and splits STRING values on ',' WITHOUT trimming.
+    const fetch = jest.fn(() => of({ data: events }));
+    const { dataSource } = createDataSource(fetch);
+
+    const response = await dataSource.query(buildRequest([{ queryType: 'events', application: 'App' }]));
+
+    const tagsField = response.data[0].fields.find((field: { name: string }) => field.name === 'tags');
+    const firstRow: unknown = tagsField?.values[0];
+    // The processor's split guard: only strings are split, on bare ','.
+    const processed = typeof firstRow === 'string' ? firstRow.split(',') : firstRow;
+    expect(processed).toEqual(['ERROR', 'MyApp']); // AnnotationEvent.tags: string[] — no stray whitespace
+  });
+
+  test('expands multi-value application variables into one events frame per application', async () => {
+    const fetch = jest.fn(() => of({ data: events }));
+    const { dataSource } = createDataSource(fetch);
+
+    const response = await dataSource.query(buildRequest([{ queryType: 'events', application: '$apps' }]));
+
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetchParams(fetch, 0).url).toBe('http://proxy/controller/rest/applications/App1/events');
+    expect(fetchParams(fetch, 1).url).toBe('http://proxy/controller/rest/applications/App2/events');
+    expect(response.data).toHaveLength(2);
+    expect(response.data.map((frame: { refId?: string }) => frame.refId)).toEqual(['A', 'A']);
   });
 
   test('interpolates event type variables and forwards them as csv', async () => {
@@ -444,7 +593,7 @@ describe('query: healthRuleViolations', () => {
     expect(frame.fields[1].values).toEqual([200, null]);
     expect(frame.fields[2].values).toEqual(['CPU high', 'Memory high']);
     expect(frame.fields[3].values).toEqual(['CPU above 90%', 'web-tier']);
-    expect(frame.fields[4].values).toEqual(['CRITICAL, RESOLVED', 'WARNING, OPEN']);
+    expect(frame.fields[4].values).toEqual(['CRITICAL,RESOLVED', 'WARNING,OPEN']);
     expect(frame.fields[5].values).toEqual(['https://controller/#/incident/1', '']);
     expect(frame.meta?.preferredVisualisationType).toBe('table');
   });

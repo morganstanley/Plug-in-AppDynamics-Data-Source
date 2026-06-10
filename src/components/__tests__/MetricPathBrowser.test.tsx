@@ -5,7 +5,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and limitations under the License.
 
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import React from 'react';
 
 import { MetricPathBrowser } from '../MetricPathBrowser';
@@ -42,6 +42,24 @@ const makeDatasource = () => ({
     async (_app: string, parentPath?: string): Promise<MetricTreeItem[]> => TREE[parentPath ?? ''] ?? []
   ),
 });
+
+/** Datasource whose responses are resolved manually by each test. */
+const makeManualDatasource = (impl: (app: string, parentPath?: string) => Promise<MetricTreeItem[]>) => ({
+  browseMetricPath: jest.fn(impl),
+});
+
+interface Deferred<T> {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+}
+
+const deferred = <T,>(): Deferred<T> => {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+};
 
 const renderBrowser = (value: string, application = 'MyApp', datasource = makeDatasource()) => {
   const onChange = jest.fn();
@@ -136,5 +154,66 @@ describe('MetricPathBrowser', () => {
     fireEvent.change(input, { target: { value: 'Errors|*' } });
     fireEvent.keyDown(input, { key: 'Enter' });
     expect(onChange).toHaveBeenCalledWith('Errors|*');
+  });
+
+  it('applies out-of-order responses to their own level only', async () => {
+    const root = deferred<MetricTreeItem[]>();
+    const child = deferred<MetricTreeItem[]>();
+    const datasource = makeManualDatasource((_app, parentPath) => (parentPath === '*' ? child.promise : root.promise));
+    // Both levels of `*` start loading immediately (wildcards behave like folders).
+    renderBrowser('*', 'MyApp', datasource);
+    await waitFor(() => expect(datasource.browseMetricPath).toHaveBeenCalledWith('MyApp', '*'));
+
+    // The deeper level resolves BEFORE its parent.
+    await act(async () => child.resolve([{ name: 'Child Leaf', type: 'leaf' }]));
+    await act(async () => root.resolve([{ name: 'Root Folder', type: 'folder' }]));
+
+    openSelect(screen.getByLabelText('Metric path segment 1'));
+    expect(await screen.findByText('Root Folder')).toBeInTheDocument();
+    expect(screen.queryByText('Child Leaf')).not.toBeInTheDocument();
+
+    openSelect(screen.getByLabelText('Metric path segment 2'));
+    expect(await screen.findByText('Child Leaf')).toBeInTheDocument();
+  });
+
+  it('drops stale responses after an application switch and keeps the committed value usable', async () => {
+    const appA = deferred<MetricTreeItem[]>();
+    const appB = deferred<MetricTreeItem[]>();
+    const datasource = makeManualDatasource((app) => (app === 'AppA' ? appA.promise : appB.promise));
+    const { rerender, props } = renderBrowser('Branch', 'AppA', datasource);
+    await waitFor(() => expect(datasource.browseMetricPath).toHaveBeenCalledWith('AppA', undefined));
+
+    rerender(<MetricPathBrowser {...props} application="AppB" />);
+    await waitFor(() => expect(datasource.browseMetricPath).toHaveBeenCalledWith('AppB', undefined));
+
+    // The old application's slow response arrives after the switch — it must be ignored.
+    await act(async () => appA.resolve([{ name: 'Stale Folder', type: 'folder' }]));
+
+    openSelect(screen.getByLabelText('Metric path segment 1'));
+    expect(screen.queryByText('Stale Folder')).not.toBeInTheDocument();
+    // The committed path segment is still rendered and usable while options load.
+    expect(screen.getByText('Branch')).toBeInTheDocument();
+
+    await act(async () => appB.resolve([{ name: 'Fresh Folder', type: 'folder' }]));
+    expect(await screen.findByText('Fresh Folder')).toBeInTheDocument();
+  });
+
+  it('does not update state when a response arrives after unmount', async () => {
+    const root = deferred<MetricTreeItem[]>();
+    const datasource = makeManualDatasource(() => root.promise);
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const { unmount } = renderBrowser('', 'MyApp', datasource);
+      await waitFor(() => expect(datasource.browseMetricPath).toHaveBeenCalled());
+
+      unmount();
+      root.resolve([{ name: 'Late Folder', type: 'folder' }]);
+      await act(async () => {});
+
+      // No "update not wrapped in act"/setState-after-unmount warnings.
+      expect(errorSpy).not.toHaveBeenCalled();
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 });

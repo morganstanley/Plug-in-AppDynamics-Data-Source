@@ -5,12 +5,12 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and limitations under the License.
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 
 import { SelectableValue } from '@grafana/data';
 import { InlineField, InlineFieldRow, Input, Select } from '@grafana/ui';
 
-import type { DataSource } from '../datasource';
+import { parseVariableQuery, type DataSource } from '../datasource';
 import { AppDynamicsVariableQuery, VariableQueryType } from '../types';
 
 export interface VariableQueryEditorProps {
@@ -40,9 +40,19 @@ function buildDefinition(query: AppDynamicsVariableQuery): string {
 
 export function VariableQueryEditor({ query, onChange, datasource }: VariableQueryEditorProps) {
   const isLegacyString = typeof query === 'string';
-  // Legacy raw strings (e.g. `tiers(MyApp)`) are parsed by the datasource at run time; the
-  // editor shows them read-only and switches to the structured form on the first edit.
-  const structured: AppDynamicsVariableQuery = isLegacyString ? { queryType: 'applications' } : query;
+  // Legacy raw strings (e.g. `tiers(MyApp)`) initialize the structured controls with their
+  // parsed content, so the first edit preserves it. Unparseable strings fall back to the
+  // default; the raw string stays visible read-only either way until an edit replaces it.
+  const structured: AppDynamicsVariableQuery = useMemo(() => {
+    if (typeof query !== 'string') {
+      return query;
+    }
+    try {
+      return parseVariableQuery(query) ?? { queryType: 'applications' };
+    } catch {
+      return { queryType: 'applications' };
+    }
+  }, [query]);
 
   const [appOptions, setAppOptions] = useState<Array<SelectableValue<string>>>([]);
   const [appsLoading, setAppsLoading] = useState(true);

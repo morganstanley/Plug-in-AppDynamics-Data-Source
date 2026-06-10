@@ -69,25 +69,69 @@ export function renderAlias(alias: string, context: AliasContext): string {
   });
 }
 
+// Multi-value variables are encoded structurally: the values are JSON-encoded
+// between two control-character markers. Control characters cannot appear in
+// AppDynamics application/metric names (and JSON.stringify escapes them inside
+// the payload), so the markers can never collide with real data — unlike a
+// textual `{a,b}` grammar, which corrupts values containing commas or braces.
+const VARIANTS_START = '\u0001';
+const VARIANTS_END = '\u0002';
+
 /**
- * Expands `{a,b}` alternations (produced by multi-value template variables)
- * into every concrete combination: `x|{a,b}|{c,d}` yields four paths. A path
- * without braces is returned as-is.
+ * `templateSrv.replace()` format callback for application/metric path fields.
+ * Single values are inserted verbatim; multi-value selections become an
+ * encoded alternation that {@link expandMetricPathVariants} expands.
+ */
+export function formatMultiValueVariable(value: string | string[]): string {
+  if (Array.isArray(value)) {
+    if (value.length === 0) {
+      return '';
+    }
+    if (value.length === 1) {
+      return String(value[0]);
+    }
+    return `${VARIANTS_START}${JSON.stringify(value.map(String))}${VARIANTS_END}`;
+  }
+  return String(value);
+}
+
+/**
+ * Expands encoded multi-value alternations (see {@link formatMultiValueVariable})
+ * into every concrete combination — `x|<a,b>|<c,d>` yields four strings, and
+ * values containing commas, braces or parentheses survive intact. Strings
+ * without markers are returned as-is. Used for both metric paths and
+ * application names.
  */
 export function expandMetricPathVariants(path: string): string[] {
-  const match = /\{([^{}]*)\}/.exec(path);
-  if (!match) {
+  const start = path.indexOf(VARIANTS_START);
+  if (start === -1) {
     return [path];
   }
-  const prefix = path.slice(0, match.index);
-  const suffix = path.slice(match.index + match[0].length);
-  return match[1].split(',').flatMap((alternative) => expandMetricPathVariants(prefix + alternative + suffix));
+  const end = path.indexOf(VARIANTS_END, start + 1);
+  if (end === -1) {
+    return [path];
+  }
+  const prefix = path.slice(0, start);
+  const suffix = path.slice(end + 1);
+  let alternatives: string[];
+  try {
+    const parsed: unknown = JSON.parse(path.slice(start + 1, end));
+    alternatives = Array.isArray(parsed) ? parsed.map(String) : [String(parsed)];
+  } catch {
+    alternatives = [path.slice(start + 1, end)];
+  }
+  return alternatives.flatMap((alternative) => expandMetricPathVariants(prefix + alternative + suffix));
 }
 
 /**
  * Parses legacy/raw string variable queries:
  * `applications`, `tiers(App)`, `nodes(App)`, `businessTransactions(App)`
  * (alias `bts(App)`) and `metrics(App, Parent|Path)`.
+ *
+ * Known limitation: in the `metrics(App, Path)` form the application name is
+ * everything before the FIRST comma, so application names that themselves
+ * contain a comma mis-parse. Use the structured variable query editor for
+ * such applications — the structured object form has no such ambiguity.
  */
 export function parseVariableQuery(raw: string): AppDynamicsVariableQuery | undefined {
   const trimmed = raw.trim();
@@ -118,29 +162,22 @@ export function parseVariableQuery(raw: string): AppDynamicsVariableQuery | unde
   return { queryType: 'businessTransactions', application };
 }
 
-/** Multi-value variables render as `{a,b}` so they can be expanded into concrete metric paths. */
-function formatMultiValueVariable(value: string | string[]): string {
-  if (Array.isArray(value)) {
-    if (value.length === 0) {
-      return '';
-    }
-    if (value.length === 1) {
-      return String(value[0]);
-    }
-    return `{${value.join(',')}}`;
-  }
-  return String(value);
-}
-
-function toDataQueryError(error: unknown, refId: string): DataQueryError {
+function toDataQueryError(error: unknown, refId: string, context?: string): DataQueryError {
+  const base = error instanceof Error ? error.message : String(error);
   const queryError: DataQueryError = {
     refId,
-    message: error instanceof Error ? error.message : String(error),
+    message: context ? `${base} (${context})` : base,
   };
   if (error instanceof AppDynamicsApiError && error.status !== undefined) {
     queryError.status = error.status;
   }
   return queryError;
+}
+
+/** Frames and per-path errors produced by a single target. */
+interface TargetResult {
+  frames: DataFrame[];
+  errors: DataQueryError[];
 }
 
 export class DataSource extends DataSourceApi<AppDynamicsQuery, AppDynamicsOptions> {
@@ -186,7 +223,9 @@ export class DataSource extends DataSourceApi<AppDynamicsQuery, AppDynamicsOptio
     await Promise.all(
       targets.map(async (target) => {
         try {
-          data.push(...(await this.runTarget(target, request.scopedVars, fromMs, toMs)));
+          const result = await this.runTarget(target, request.scopedVars, fromMs, toMs);
+          data.push(...result.frames);
+          errors.push(...result.errors);
         } catch (error) {
           errors.push(toDataQueryError(error, target.refId));
         }
@@ -289,50 +328,84 @@ export class DataSource extends DataSourceApi<AppDynamicsQuery, AppDynamicsOptio
 
   // --- per-query-type execution ---
 
+  /** Interpolates a field and expands multi-value variables into concrete values (deduplicated). */
+  private expandVariants(raw: string, scopedVars: ScopedVars): string[] {
+    const interpolated = this.templateSrv.replace(raw, scopedVars, formatMultiValueVariable);
+    return Array.from(new Set(expandMetricPathVariants(interpolated)));
+  }
+
   private async runTarget(
     target: AppDynamicsQuery,
     scopedVars: ScopedVars,
     fromMs: number,
     toMs: number
-  ): Promise<DataFrame[]> {
-    const application = this.templateSrv.replace(target.application ?? '', scopedVars);
+  ): Promise<TargetResult> {
+    // Multi-value variables in the application expand to one query per value.
+    const applications = this.expandVariants(target.application ?? '', scopedVars);
     switch (target.queryType) {
-      case 'events':
-        return [await this.runEventsTarget(target, application, scopedVars, fromMs, toMs)];
-      case 'healthRuleViolations':
-        return [await this.runHealthRuleViolationsTarget(target, application, fromMs, toMs)];
+      case 'events': {
+        const frames = await Promise.all(
+          applications.map((application) => this.runEventsTarget(target, application, scopedVars, fromMs, toMs))
+        );
+        return { frames, errors: [] };
+      }
+      case 'healthRuleViolations': {
+        const frames = await Promise.all(
+          applications.map((application) => this.runHealthRuleViolationsTarget(target, application, fromMs, toMs))
+        );
+        return { frames, errors: [] };
+      }
       default:
-        return this.runMetricsTarget(target, application, scopedVars, fromMs, toMs);
+        return this.runMetricsTarget(target, applications, scopedVars, fromMs, toMs);
     }
   }
 
   private async runMetricsTarget(
     target: AppDynamicsQuery,
-    application: string,
+    applications: string[],
     scopedVars: ScopedVars,
     fromMs: number,
     toMs: number
-  ): Promise<DataFrame[]> {
-    const interpolatedPath = this.templateSrv.replace(target.metricPath ?? '', scopedVars, formatMultiValueVariable);
-    const paths = Array.from(new Set(expandMetricPathVariants(interpolatedPath)));
+  ): Promise<TargetResult> {
+    const paths = this.expandVariants(target.metricPath ?? '', scopedVars);
+    const multiApp = applications.length > 1;
+    const requests = applications.flatMap((application) => paths.map((path) => ({ application, path })));
 
-    const seriesLists = await Promise.all(
-      paths.map((path) => this.client.getMetricData(application, path, fromMs, toMs, target.rollup ?? false))
+    // allSettled so one failing path/application cannot drop sibling successes:
+    // the target contributes its surviving frames AND a per-path error.
+    const settled = await Promise.allSettled(
+      requests.map(({ application, path }) =>
+        this.client.getMetricData(application, path, fromMs, toMs, target.rollup ?? false)
+      )
     );
 
-    return seriesLists.flatMap((seriesList) =>
-      seriesList.map((series) => this.metricSeriesToFrame(target, application, series))
-    );
+    const frames: DataFrame[] = [];
+    const errors: DataQueryError[] = [];
+    settled.forEach((result, index) => {
+      const { application, path } = requests[index];
+      if (result.status === 'fulfilled') {
+        frames.push(...result.value.map((series) => this.metricSeriesToFrame(target, application, series, multiApp)));
+      } else {
+        const context = multiApp ? `application "${application}", metric path "${path}"` : `metric path "${path}"`;
+        errors.push(toDataQueryError(result.reason, target.refId, context));
+      }
+    });
+    return { frames, errors };
   }
 
-  private metricSeriesToFrame(target: AppDynamicsQuery, application: string, series: MetricSeries): DataFrame {
+  private metricSeriesToFrame(
+    target: AppDynamicsQuery,
+    application: string,
+    series: MetricSeries,
+    multiApp: boolean
+  ): DataFrame {
     const statField = target.dataField ?? 'value';
     const times: number[] = [];
     const values: number[] = [];
 
     for (const metricValue of series.metricValues ?? []) {
-      const stat = metricValue[statField];
-      if (stat === undefined || stat === null) {
+      const stat = coerceStat(metricValue[statField]);
+      if (stat === undefined) {
         continue;
       }
       times.push(metricValue.startTimeInMillis);
@@ -344,9 +417,14 @@ export class DataSource extends DataSourceApi<AppDynamicsQuery, AppDynamicsOptio
       metricPath: series.metricPath,
       metricName: series.metricName,
     };
+    const baseName = series.metricPath ?? series.metricName ?? target.metricPath ?? target.refId;
+    // With multiple applications in play the path alone is ambiguous, so the
+    // default name carries the application ({{application}} covers aliases).
     const name = target.alias
       ? renderAlias(target.alias, context)
-      : (series.metricPath ?? series.metricName ?? target.metricPath ?? target.refId);
+      : multiApp
+        ? `${application}: ${baseName}`
+        : baseName;
 
     return createDataFrame({
       refId: target.refId,
@@ -354,6 +432,7 @@ export class DataSource extends DataSourceApi<AppDynamicsQuery, AppDynamicsOptio
         { name: 'Time', type: FieldType.time, values: times },
         { name, type: FieldType.number, values },
       ],
+      meta: { preferredVisualisationType: 'graph' },
     });
   }
 
@@ -418,6 +497,7 @@ export class DataSource extends DataSourceApi<AppDynamicsQuery, AppDynamicsOptio
 
   private toEpochMillis(value: DateTime | string): number {
     if (typeof value === 'string') {
+      // eslint-disable-next-line @typescript-eslint/no-deprecated -- string ranges are legacy behavior mandated by design §4.3; dateMath.parse is the documented parser for them
       const parsed = dateMath.parse(value);
       return Math.ceil(parsed?.valueOf() ?? 0);
     }
@@ -425,15 +505,38 @@ export class DataSource extends DataSourceApi<AppDynamicsQuery, AppDynamicsOptio
   }
 }
 
+// Tags field shape — verified against Grafana's default annotation processor
+// (grafana/grafana public/app/features/annotations/standardAnnotationSupport.ts,
+// not published to npm, so it cannot be exercised directly in our tests): the
+// processor matches the field NAMED 'tags' and, because the field info carries
+// `split: ','`, a STRING value is split on ',' into AnnotationEvent.tags
+// (string[]). The split does NOT trim, hence the bare ',' join below (no
+// space). Array values would pass through the `typeof v === 'string'` guard
+// untouched, but a comma-joined string also renders cleanly in table panels.
 function eventTags(event: AppDynamicsEvent): string {
   const entityNames = (event.affectedEntities ?? [])
     .map((entity) => entity.name)
     .filter((name): name is string => Boolean(name));
-  return [event.severity, ...entityNames].filter(Boolean).join(', ');
+  return [event.severity, ...entityNames].filter(Boolean).join(',');
 }
 
 function violationTags(violation: HealthRuleViolation): string {
-  return [violation.severity, violation.incidentStatus].filter(Boolean).join(', ');
+  return [violation.severity, violation.incidentStatus].filter(Boolean).join(',');
+}
+
+/**
+ * Older controllers return metric stats as strings; coerce both forms and
+ * drop anything non-finite (null, NaN, Infinity, garbage strings).
+ */
+function coerceStat(raw: unknown): number | undefined {
+  if (typeof raw === 'number') {
+    return Number.isFinite(raw) ? raw : undefined;
+  }
+  if (typeof raw === 'string' && raw.trim() !== '') {
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+  return undefined;
 }
 
 /** Open violations report no (or a non-positive) end time; emit null so Grafana treats them as ongoing. */
