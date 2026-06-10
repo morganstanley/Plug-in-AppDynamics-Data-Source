@@ -6,7 +6,13 @@
 // See the License for the specific language governing permissions and limitations under the License.
 
 import { of, throwError } from 'rxjs';
-import { dateTime, type DataQueryRequest, type DataSourceInstanceSettings, type ScopedVars } from '@grafana/data';
+import {
+  dateTime,
+  FieldType,
+  type DataQueryRequest,
+  type DataSourceInstanceSettings,
+  type ScopedVars,
+} from '@grafana/data';
 import type { BackendSrv, TemplateSrv } from '@grafana/runtime';
 
 import {
@@ -119,6 +125,17 @@ describe('formatMultiValueVariable + expandMetricPathVariants', () => {
       'Parent|Average Response Time (ms)|Leaf',
       'Parent|{a,b}|Leaf',
     ]);
+  });
+
+  test('a value containing literal marker characters survives byte-identical (decoded values are not re-scanned)', () => {
+    const weird = 'X\u0001literal\u0002Y';
+    const path = `P|${formatMultiValueVariable([weird, 'plain'])}|S`;
+    expect(expandMetricPathVariants(path)).toEqual([`P|${weird}|S`, 'P|plain|S']);
+  });
+
+  test('malformed marker payloads pass through untouched', () => {
+    const malformed = 'A|\u0001not-json\u0002|B';
+    expect(expandMetricPathVariants(malformed)).toEqual([malformed]);
   });
 });
 
@@ -398,6 +415,33 @@ describe('query: metrics', () => {
     expect(response.errors?.[0].message).toContain('Tiers|tierB|Calls');
   });
 
+  test('reports one error per request when ALL expanded requests of a target fail, keeping other targets', async () => {
+    const fetch = jest.fn((options: FetchCall) =>
+      options.url.includes('/GoodApp/')
+        ? of({ data: [series('ok', [{ startTimeInMillis: 1, value: 1 }])] })
+        : throwError(() => ({ status: 500, data: 'boom' }))
+    );
+    const { dataSource } = createDataSource(fetch);
+
+    const response = await dataSource.query(
+      buildRequest([
+        { application: '$apps', metricPath: 'X|Calls' },
+        { application: 'GoodApp', metricPath: 'ok' },
+      ])
+    );
+
+    // Only the healthy sibling target contributes frames...
+    expect(response.data).toHaveLength(1);
+    expect(response.data[0].refId).toBe('B');
+    // ...and the failed target reports one error per expanded application×path request.
+    expect(response.errors).toHaveLength(2);
+    expect(response.errors?.every((error) => error.refId === 'A')).toBe(true);
+    expect(response.errors?.map((error) => error.message)).toEqual([
+      expect.stringContaining('application "App1", metric path "X|Calls"'),
+      expect.stringContaining('application "App2", metric path "X|Calls"'),
+    ]);
+  });
+
   test('isolates per-target failures into DataQueryResponse.errors', async () => {
     const fetch = jest.fn((options: FetchCall) =>
       options.params['metric-path'] === 'bad'
@@ -463,7 +507,12 @@ describe('query: events', () => {
       severity: 'ERROR',
       summary: 'Something broke',
       deepLinkUrl: 'https://controller/#/event/11',
-      affectedEntities: [{ entityType: 'APPLICATION', name: 'MyApp' }, { entityType: 'NODE' }],
+      affectedEntities: [
+        { entityType: 'APPLICATION', name: 'MyApp' },
+        { entityType: 'NODE' },
+        // AppDynamics entity names may legitimately contain commas.
+        { entityType: 'BUSINESS_TRANSACTION', name: 'Checkout, EU' },
+      ],
     },
     {
       id: 12,
@@ -490,16 +539,20 @@ describe('query: events', () => {
     expect(frame.fields[0].values).toEqual([123, 456]);
     expect(frame.fields[1].values).toEqual(['APPLICATION_ERROR', 'sub']);
     expect(frame.fields[2].values).toEqual(['Something broke', '']);
-    expect(frame.fields[3].values).toEqual(['ERROR,MyApp', '']);
+    expect(frame.fields[3].type).toBe(FieldType.other);
+    expect(frame.fields[3].values).toEqual([['ERROR', 'MyApp', 'Checkout, EU'], []]);
     expect(frame.fields[4].values).toEqual(['11', '12']);
     expect(frame.fields[5].values).toEqual(['https://controller/#/event/11', '']);
     expect(frame.meta?.preferredVisualisationType).toBe('table');
   });
 
-  test('tags survive Grafana default annotation processing (field named "tags", split on bare comma)', async () => {
+  test('tags take the array pass-through branch of Grafana default annotation processing', async () => {
     // Grafana's default annotation processor (standardAnnotationSupport.ts in
-    // grafana/grafana core — not published to npm, hence simulated here) maps
-    // the field NAMED 'tags' and splits STRING values on ',' WITHOUT trimming.
+    // grafana/grafana core — not published to npm, hence its guard is mirrored
+    // here) maps the field NAMED 'tags' and applies
+    // `typeof v === 'string' ? v.split(',') : v` — strings are comma-split,
+    // ARRAYS pass through untouched. Emitting string[] rows therefore keeps
+    // comma-containing tag values intact in AnnotationEvent.tags.
     const fetch = jest.fn(() => of({ data: events }));
     const { dataSource } = createDataSource(fetch);
 
@@ -507,9 +560,40 @@ describe('query: events', () => {
 
     const tagsField = response.data[0].fields.find((field: { name: string }) => field.name === 'tags');
     const firstRow: unknown = tagsField?.values[0];
-    // The processor's split guard: only strings are split, on bare ','.
-    const processed = typeof firstRow === 'string' ? firstRow.split(',') : firstRow;
-    expect(processed).toEqual(['ERROR', 'MyApp']); // AnnotationEvent.tags: string[] — no stray whitespace
+    expect(Array.isArray(firstRow)).toBe(true); // pass-through branch, not the split branch
+    const processed: unknown = typeof firstRow === 'string' ? firstRow.split(',') : firstRow;
+    expect(processed).toEqual(['ERROR', 'MyApp', 'Checkout, EU']); // 3 tags — comma inside a tag preserved
+  });
+
+  test('keeps surviving applications when one fails (events)', async () => {
+    const fetch = jest.fn((options: FetchCall) =>
+      options.url.includes('/App2/') ? throwError(() => ({ status: 500, data: 'boom' })) : of({ data: events })
+    );
+    const { dataSource } = createDataSource(fetch);
+
+    const response = await dataSource.query(buildRequest([{ queryType: 'events', application: '$apps' }]));
+
+    expect(response.data).toHaveLength(1);
+    expect(response.data[0].refId).toBe('A');
+    expect(response.errors).toHaveLength(1);
+    expect(response.errors?.[0].refId).toBe('A');
+    expect(response.errors?.[0].status).toBe(500);
+    expect(response.errors?.[0].message).toContain('application "App2"');
+  });
+
+  test('reports one error per application and no frames when all applications fail (events)', async () => {
+    const fetch = jest.fn(() => throwError(() => ({ status: 503, data: 'down' })));
+    const { dataSource } = createDataSource(fetch);
+
+    const response = await dataSource.query(buildRequest([{ queryType: 'events', application: '$apps' }]));
+
+    expect(response.data).toEqual([]);
+    expect(response.errors).toHaveLength(2);
+    expect(response.errors?.every((error) => error.refId === 'A')).toBe(true);
+    expect(response.errors?.map((error) => error.message)).toEqual([
+      expect.stringContaining('application "App1"'),
+      expect.stringContaining('application "App2"'),
+    ]);
   });
 
   test('expands multi-value application variables into one events frame per application', async () => {
@@ -552,28 +636,29 @@ describe('query: events', () => {
 });
 
 describe('query: healthRuleViolations', () => {
+  const violations = [
+    {
+      id: 1,
+      name: 'CPU high',
+      startTimeInMillis: 100,
+      endTimeInMillis: 200,
+      incidentStatus: 'RESOLVED',
+      severity: 'CRITICAL',
+      description: 'CPU above 90%',
+      deepLinkUrl: 'https://controller/#/incident/1',
+    },
+    {
+      id: 2,
+      name: 'Memory high',
+      startTimeInMillis: 300,
+      endTimeInMillis: -1,
+      incidentStatus: 'OPEN',
+      severity: 'WARNING',
+      affectedEntityDefinition: { entityType: 'APPLICATION_COMPONENT', name: 'web-tier' },
+    },
+  ];
+
   test('builds an annotation-shaped frame with timeEnd only for resolved violations', async () => {
-    const violations = [
-      {
-        id: 1,
-        name: 'CPU high',
-        startTimeInMillis: 100,
-        endTimeInMillis: 200,
-        incidentStatus: 'RESOLVED',
-        severity: 'CRITICAL',
-        description: 'CPU above 90%',
-        deepLinkUrl: 'https://controller/#/incident/1',
-      },
-      {
-        id: 2,
-        name: 'Memory high',
-        startTimeInMillis: 300,
-        endTimeInMillis: -1,
-        incidentStatus: 'OPEN',
-        severity: 'WARNING',
-        affectedEntityDefinition: { entityType: 'APPLICATION_COMPONENT', name: 'web-tier' },
-      },
-    ];
     const fetch = jest.fn(() => of({ data: violations }));
     const { dataSource } = createDataSource(fetch);
 
@@ -593,9 +678,33 @@ describe('query: healthRuleViolations', () => {
     expect(frame.fields[1].values).toEqual([200, null]);
     expect(frame.fields[2].values).toEqual(['CPU high', 'Memory high']);
     expect(frame.fields[3].values).toEqual(['CPU above 90%', 'web-tier']);
-    expect(frame.fields[4].values).toEqual(['CRITICAL,RESOLVED', 'WARNING,OPEN']);
+    expect(frame.fields[4].type).toBe(FieldType.other);
+    expect(frame.fields[4].values).toEqual([
+      ['CRITICAL', 'RESOLVED'],
+      ['WARNING', 'OPEN'],
+    ]);
     expect(frame.fields[5].values).toEqual(['https://controller/#/incident/1', '']);
     expect(frame.meta?.preferredVisualisationType).toBe('table');
+  });
+
+  test('keeps surviving applications when one fails (health rule violations)', async () => {
+    const fetch = jest.fn((options: FetchCall) =>
+      options.url.includes('/App2/') ? throwError(() => ({ status: 500, data: 'boom' })) : of({ data: violations })
+    );
+    const { dataSource } = createDataSource(fetch);
+
+    const response = await dataSource.query(
+      buildRequest([{ queryType: 'healthRuleViolations', application: '$apps' }])
+    );
+
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(response.data).toHaveLength(1);
+    expect(response.data[0].refId).toBe('A');
+    expect(response.data[0].fields[2].values).toEqual(['CPU high', 'Memory high']);
+    expect(response.errors).toHaveLength(1);
+    expect(response.errors?.[0].refId).toBe('A');
+    expect(response.errors?.[0].status).toBe(500);
+    expect(response.errors?.[0].message).toContain('application "App2"');
   });
 });
 

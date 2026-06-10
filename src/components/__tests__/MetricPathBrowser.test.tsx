@@ -216,4 +216,52 @@ describe('MetricPathBrowser', () => {
       errorSpy.mockRestore();
     }
   });
+
+  it('keeps a failed level usable with * and retries when the menu is opened', async () => {
+    const datasource = makeManualDatasource(async () => []);
+    datasource.browseMetricPath
+      .mockRejectedValueOnce(new Error('gateway timeout'))
+      .mockResolvedValueOnce([{ name: 'Recovered Folder', type: 'folder' }]);
+    renderBrowser('', 'MyApp', datasource);
+
+    await waitFor(() => expect(datasource.browseMetricPath).toHaveBeenCalledTimes(1));
+    await act(async () => {}); // let the rejection settle into the failed state
+
+    // The level still renders, shows the retry affordance, and is not stuck loading.
+    const level1 = screen.getByLabelText('Metric path segment 1');
+    expect(screen.getByText('Load failed — open to retry')).toBeInTheDocument();
+    expect(screen.queryByText('Recovered Folder')).not.toBeInTheDocument();
+
+    // Opening the menu forgets the failure and refetches; * stays available throughout.
+    openSelect(level1);
+    await waitFor(() => expect(datasource.browseMetricPath).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText('Recovered Folder')).toBeInTheDocument();
+    expect(screen.getByText('*')).toBeInTheDocument();
+  });
+
+  it('does not poison the cache after repeated failures', async () => {
+    const datasource = makeManualDatasource(async () => []);
+    datasource.browseMetricPath
+      .mockRejectedValueOnce(new Error('boom 1'))
+      .mockRejectedValueOnce(new Error('boom 2'))
+      .mockResolvedValueOnce([{ name: 'Finally Loaded', type: 'folder' }]);
+    renderBrowser('', 'MyApp', datasource);
+
+    // Initial load fails; the failure is not auto-retried in a loop.
+    await waitFor(() => expect(datasource.browseMetricPath).toHaveBeenCalledTimes(1));
+    await act(async () => {});
+    expect(datasource.browseMetricPath).toHaveBeenCalledTimes(1);
+
+    // First reopen → second attempt (fails again, still not cached as loaded).
+    const level1 = screen.getByLabelText('Metric path segment 1');
+    openSelect(level1);
+    await waitFor(() => expect(datasource.browseMetricPath).toHaveBeenCalledTimes(2));
+    await act(async () => {});
+
+    // Close and reopen → third attempt hits the datasource again and succeeds.
+    fireEvent.keyDown(level1, { key: 'Escape' });
+    openSelect(level1);
+    await waitFor(() => expect(datasource.browseMetricPath).toHaveBeenCalledTimes(3));
+    expect(await screen.findByText('Finally Loaded')).toBeInTheDocument();
+  });
 });

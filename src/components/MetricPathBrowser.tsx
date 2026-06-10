@@ -38,6 +38,12 @@ export function MetricPathBrowser({ application, value, onChange, datasource }: 
    * `undefined` for a key means "not loaded yet" and renders as a loading state.
    */
   const [optionsByKey, setOptionsByKey] = useState<Record<string, MetricTreeItem[]>>({});
+  /**
+   * Keys whose last browse attempt failed. Failures are deliberately NOT cached into
+   * `optionsByKey`, so they stay retryable: reopening the level's Select clears its key here,
+   * which makes the load effect fetch it again. The level keeps rendering with `*` meanwhile.
+   */
+  const [failedKeys, setFailedKeys] = useState<Set<string>>(() => new Set());
 
   // React's "adjust state during render" pattern (https://react.dev/learn/you-might-not-need-an-effect):
   // keep the raw editor in sync when the path changes from the outside...
@@ -51,6 +57,7 @@ export function MetricPathBrowser({ application, value, onChange, datasource }: 
   if (prevApplication !== application) {
     setPrevApplication(application);
     setOptionsByKey({});
+    setFailedKeys(new Set());
   }
 
   /**
@@ -109,7 +116,9 @@ export function MetricPathBrowser({ application, value, onChange, datasource }: 
     }
     for (const prefix of prefixes) {
       const key = keyFor(prefix);
-      if (optionsByKey[key] !== undefined || inFlightRef.current.has(key)) {
+      // Failed keys are skipped here so a failing controller is not hammered in a render loop;
+      // they are refetched once the user reopens the level (which clears the failed flag).
+      if (optionsByKey[key] !== undefined || failedKeys.has(key) || inFlightRef.current.has(key)) {
         continue;
       }
       inFlightRef.current.add(key);
@@ -119,19 +128,47 @@ export function MetricPathBrowser({ application, value, onChange, datasource }: 
         .then((items) => {
           if (epochRef.current === epoch) {
             setOptionsByKey((prev) => ({ ...prev, [key]: items }));
+            setFailedKeys((prev) => {
+              if (!prev.has(key)) {
+                return prev;
+              }
+              const next = new Set(prev);
+              next.delete(key);
+              return next;
+            });
           }
         })
         .catch(() => {
-          // Browsing is best-effort; the `*` option and raw mode remain usable.
+          // Browsing is best-effort; the `*` option and raw mode remain usable. Mark the key
+          // failed (NOT loaded) so the level can be retried instead of staying empty forever.
           if (epochRef.current === epoch) {
-            setOptionsByKey((prev) => ({ ...prev, [key]: [] }));
+            setFailedKeys((prev) => {
+              if (prev.has(key)) {
+                return prev;
+              }
+              const next = new Set(prev);
+              next.add(key);
+              return next;
+            });
           }
         })
         .finally(() => {
           inFlightRef.current.delete(key);
         });
     }
-  }, [application, rawMode, segments, nextLevelVisible, optionsByKey, keyFor, datasource]);
+  }, [application, rawMode, segments, nextLevelVisible, optionsByKey, failedKeys, keyFor, datasource]);
+
+  /** Forget a level's failure so the load effect re-attempts the fetch (used on menu open). */
+  const retryKey = (key: string) => {
+    setFailedKeys((prev) => {
+      if (!prev.has(key)) {
+        return prev;
+      }
+      const next = new Set(prev);
+      next.delete(key);
+      return next;
+    });
+  };
 
   const handleLevelChange = (level: number, selected: string) => {
     // Choosing a value at level N truncates everything deeper than N.
@@ -165,6 +202,7 @@ export function MetricPathBrowser({ application, value, onChange, datasource }: 
     const prefix = segments.slice(0, level).join('|');
     const key = keyFor(prefix);
     const items = optionsByKey[key] ?? [];
+    const failed = failedKeys.has(key);
     const current = isPending ? undefined : segments[level];
     const options: Array<SelectableValue<string>> = [
       { label: WILDCARD, value: WILDCARD, description: 'Wildcard — matches everything at this level' },
@@ -181,8 +219,10 @@ export function MetricPathBrowser({ application, value, onChange, datasource }: 
         width="auto"
         options={options}
         value={current ? { label: current, value: current } : null}
-        isLoading={optionsByKey[key] === undefined}
-        placeholder="Select…"
+        isLoading={optionsByKey[key] === undefined && !failed}
+        invalid={failed}
+        placeholder={failed ? 'Load failed — open to retry' : 'Select…'}
+        onOpenMenu={() => retryKey(key)}
         onChange={(option) => {
           if (option.value != null) {
             handleLevelChange(level, option.value);

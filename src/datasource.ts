@@ -111,16 +111,20 @@ export function expandMetricPathVariants(path: string): string[] {
   if (end === -1) {
     return [path];
   }
-  const prefix = path.slice(0, start);
-  const suffix = path.slice(end + 1);
   let alternatives: string[];
   try {
     const parsed: unknown = JSON.parse(path.slice(start + 1, end));
     alternatives = Array.isArray(parsed) ? parsed.map(String) : [String(parsed)];
   } catch {
-    alternatives = [path.slice(start + 1, end)];
+    // Not a payload produced by formatMultiValueVariable — pass through untouched.
+    return [path];
   }
-  return alternatives.flatMap((alternative) => expandMetricPathVariants(prefix + alternative + suffix));
+  const prefix = path.slice(0, start);
+  // Recurse only on the remainder of the ORIGINAL string. Decoded alternatives
+  // are literal values and are never re-scanned, so a value that itself
+  // contains marker characters survives expansion byte-identical.
+  const suffixes = expandMetricPathVariants(path.slice(end + 1));
+  return alternatives.flatMap((alternative) => suffixes.map((suffix) => prefix + alternative + suffix));
 }
 
 /**
@@ -343,21 +347,40 @@ export class DataSource extends DataSourceApi<AppDynamicsQuery, AppDynamicsOptio
     // Multi-value variables in the application expand to one query per value.
     const applications = this.expandVariants(target.application ?? '', scopedVars);
     switch (target.queryType) {
-      case 'events': {
-        const frames = await Promise.all(
-          applications.map((application) => this.runEventsTarget(target, application, scopedVars, fromMs, toMs))
+      case 'events':
+        return this.settlePerApplication(applications, target.refId, (application) =>
+          this.runEventsTarget(target, application, scopedVars, fromMs, toMs)
         );
-        return { frames, errors: [] };
-      }
-      case 'healthRuleViolations': {
-        const frames = await Promise.all(
-          applications.map((application) => this.runHealthRuleViolationsTarget(target, application, fromMs, toMs))
+      case 'healthRuleViolations':
+        return this.settlePerApplication(applications, target.refId, (application) =>
+          this.runHealthRuleViolationsTarget(target, application, fromMs, toMs)
         );
-        return { frames, errors: [] };
-      }
       default:
         return this.runMetricsTarget(target, applications, scopedVars, fromMs, toMs);
     }
+  }
+
+  /**
+   * Runs one request per application via allSettled so a failing application
+   * cannot drop sibling applications' frames; failures become per-application
+   * errors naming the application.
+   */
+  private async settlePerApplication(
+    applications: string[],
+    refId: string,
+    run: (application: string) => Promise<DataFrame>
+  ): Promise<TargetResult> {
+    const settled = await Promise.allSettled(applications.map(run));
+    const frames: DataFrame[] = [];
+    const errors: DataQueryError[] = [];
+    settled.forEach((result, index) => {
+      if (result.status === 'fulfilled') {
+        frames.push(result.value);
+      } else {
+        errors.push(toDataQueryError(result.reason, refId, `application "${applications[index]}"`));
+      }
+    });
+    return { frames, errors };
   }
 
   private async runMetricsTarget(
@@ -453,7 +476,7 @@ export class DataSource extends DataSourceApi<AppDynamicsQuery, AppDynamicsOptio
         { name: 'time', type: FieldType.time, values: events.map((event) => event.eventTime) },
         { name: 'title', type: FieldType.string, values: events.map((event) => event.type ?? event.subType ?? '') },
         { name: 'text', type: FieldType.string, values: events.map((event) => event.summary ?? '') },
-        { name: 'tags', type: FieldType.string, values: events.map(eventTags) },
+        { name: 'tags', type: FieldType.other, values: events.map(eventTags) },
         { name: 'id', type: FieldType.string, values: events.map((event) => String(event.id)) },
         { name: 'deepLinkUrl', type: FieldType.string, values: events.map((event) => event.deepLinkUrl ?? '') },
       ],
@@ -480,7 +503,7 @@ export class DataSource extends DataSourceApi<AppDynamicsQuery, AppDynamicsOptio
           type: FieldType.string,
           values: violations.map((v) => v.description ?? v.affectedEntityDefinition?.name ?? ''),
         },
-        { name: 'tags', type: FieldType.string, values: violations.map(violationTags) },
+        { name: 'tags', type: FieldType.other, values: violations.map(violationTags) },
         { name: 'deepLinkUrl', type: FieldType.string, values: violations.map((v) => v.deepLinkUrl ?? '') },
       ],
       meta: { preferredVisualisationType: 'table' },
@@ -508,20 +531,20 @@ export class DataSource extends DataSourceApi<AppDynamicsQuery, AppDynamicsOptio
 // Tags field shape — verified against Grafana's default annotation processor
 // (grafana/grafana public/app/features/annotations/standardAnnotationSupport.ts,
 // not published to npm, so it cannot be exercised directly in our tests): the
-// processor matches the field NAMED 'tags' and, because the field info carries
-// `split: ','`, a STRING value is split on ',' into AnnotationEvent.tags
-// (string[]). The split does NOT trim, hence the bare ',' join below (no
-// space). Array values would pass through the `typeof v === 'string'` guard
-// untouched, but a comma-joined string also renders cleanly in table panels.
-function eventTags(event: AppDynamicsEvent): string {
+// processor matches the field NAMED 'tags' and splits STRING values on ','
+// (`typeof v === 'string'` guard), while ARRAY values pass through untouched
+// into AnnotationEvent.tags (string[]). We emit string[] rows (FieldType.other)
+// so tag values that themselves contain commas — AppDynamics entity names may —
+// can never be corrupted by that split. Table panels render the array form.
+function eventTags(event: AppDynamicsEvent): string[] {
   const entityNames = (event.affectedEntities ?? [])
     .map((entity) => entity.name)
     .filter((name): name is string => Boolean(name));
-  return [event.severity, ...entityNames].filter(Boolean).join(',');
+  return [event.severity, ...entityNames].filter((tag): tag is string => Boolean(tag));
 }
 
-function violationTags(violation: HealthRuleViolation): string {
-  return [violation.severity, violation.incidentStatus].filter(Boolean).join(',');
+function violationTags(violation: HealthRuleViolation): string[] {
+  return [violation.severity, violation.incidentStatus].filter((tag): tag is string => Boolean(tag));
 }
 
 /**
