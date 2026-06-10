@@ -75,7 +75,7 @@ const buildRequest = (
     targets: targets.map((target, index) => ({ refId: String.fromCharCode(65 + index), ...target })),
     range,
     scopedVars: {},
-  } as unknown as DataQueryRequest<AppDynamicsQuery>);
+  }) as unknown as DataQueryRequest<AppDynamicsQuery>;
 
 const fetchParams = (fetch: jest.Mock, call = 0): FetchCall => fetch.mock.calls[call][0];
 

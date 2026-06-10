@@ -51,4 +51,5 @@ You can contribute to us in several ways. Here are some examples:
 For more ways to contribute, check out the [Open Source Guides](https://opensource.guide/how-to-contribute/).
 
 ### Contributing
-If you are interested in contributing to Fluent bit with bug fixes, new features or coding in general, please refer to the code [CONTRIBUTING](./CONTRIBUTING.md) guidelines. 
+
+If you are interested in contributing to Fluent bit with bug fixes, new features or coding in general, please refer to the code [CONTRIBUTING](./CONTRIBUTING.md) guidelines.

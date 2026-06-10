@@ -346,7 +346,7 @@ export class DataSource extends DataSourceApi<AppDynamicsQuery, AppDynamicsOptio
     };
     const name = target.alias
       ? renderAlias(target.alias, context)
-      : series.metricPath ?? series.metricName ?? target.metricPath ?? target.refId;
+      : (series.metricPath ?? series.metricName ?? target.metricPath ?? target.refId);
 
     return createDataFrame({
       refId: target.refId,

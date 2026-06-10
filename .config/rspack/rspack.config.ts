@@ -193,7 +193,7 @@ const config = async (env): Promise<Configuration> => {
         },
       ]),
       new SubresourceIntegrityPlugin({
-        hashFuncNames: ["sha256"],
+        hashFuncNames: ['sha256'],
       }),
       ...(env.development
         ? [

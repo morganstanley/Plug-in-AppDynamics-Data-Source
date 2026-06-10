@@ -36,6 +36,7 @@ export default defineConfig([
   },
 ]);
 ```
+
 ---
 
 ### Extending the Prettier config
